@@ -42,10 +42,14 @@ async function runIntegration() {
 
   try {
     const dataFim = new Date(); 
-    const dataInicio = new Date(2025, 0, 1); // 01/01/2025
+    dataFim.setDate(dataFim.getDate() - 1); // Agora dataFim é ontem
+
+    const dataInicio = new Date(dataFim); // dataInicio também é ontem
 
     const dsInicio = dataInicio.toISOString().split('T')[0];
     const dsFim = dataFim.toISOString().split('T')[0];
+
+    console.log(`Buscando apenas o dia: ${dsInicio}`);
 
     const allCalls = [];
     let posicao = 0;
