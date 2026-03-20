@@ -38,24 +38,28 @@ const formatarParaBR = (dataISO) => {
 };
 
 async function runIntegration() {
-  console.log(`INICIANDO SYNC HISTORICO COMPLETO: ${new Date().toLocaleString('pt-BR')}`);
+  console.log(`INICIANDO SYNC DIARIO: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
 
   try {
-    const dataFim = new Date(); 
-    dataFim.setDate(dataFim.getDate() - 1); // Agora dataFim é ontem
+    // --- AJUSTE DE FUSO HORARIO PARA PEGAR ONTEM CORRETAMENTE ---
+    // Cria a data atual baseada no fuso de Brasília
+    const hojeBR = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Sao_Paulo"}));
+    
+    // Subtrai 1 dia para garantir que estamos em "Ontem" no horário de Brasília
+    hojeBR.setDate(hojeBR.getDate() - 1);
 
-    const dataInicio = new Date(dataFim); // dataInicio também é ontem
+    const ano = hojeBR.getFullYear();
+    const mes = String(hojeBR.getMonth() + 1).padStart(2, '0');
+    const dia = String(hojeBR.getDate()).padStart(2, '0');
+    
+    const dsInicio = `${ano}-${mes}-${dia}`;
+    const dsFim = dsInicio; 
 
-    const dsInicio = dataInicio.toISOString().split('T')[0];
-    const dsFim = dataFim.toISOString().split('T')[0];
-
-    console.log(`Buscando apenas o dia: ${dsInicio}`);
+    console.log(`Buscando dados de: ${dsInicio}`);
 
     const allCalls = [];
     let posicao = 0;
     const limite = 200;
-
-    console.log(`Buscando de ${dsInicio} ate ${dsFim}`);
 
     while (true) {
       const endpoint = ZENVIA_QUEUE_ID 
@@ -85,15 +89,19 @@ async function runIntegration() {
       if (calls.length < limite) break;
       posicao += limite;
       
-      if (posicao > 1000) {
-        console.warn("Limite de seguranca de 500k atingido.");
+      // Trava de seguranca para evitar loops infinitos
+      if (posicao > 50000) {
+        console.warn("Limite de seguranca de 50k atingido.");
         break;
       }
     }
 
     console.log(`Total capturado: ${allCalls.length} registros.`);
 
-    if (allCalls.length === 0) return;
+    if (allCalls.length === 0) {
+      console.log("Nenhum registro encontrado para ontem.");
+      return;
+    }
 
     // Mapeamento para o padrao icaiu_telefonia
     const rows = allCalls.map(item => {
@@ -133,7 +141,6 @@ async function runIntegration() {
       ];
     });
 
-    // Envio em blocos de 5000 para nao estourar o Google
     const chunk_size = 5000;
     for (let i = 0; i < rows.length; i += chunk_size) {
       const chunk = rows.slice(i, i + chunk_size);
@@ -146,7 +153,7 @@ async function runIntegration() {
       });
     }
 
-    console.log("Carga completa de 2025 ate hoje realizada com sucesso.");
+    console.log(`Sync do dia ${dsInicio} concluido com sucesso.`);
 
   } catch (error) {
     console.error("ERRO NO PROCESSO:");
