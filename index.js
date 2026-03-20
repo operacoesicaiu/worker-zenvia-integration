@@ -38,11 +38,11 @@ const formatarParaBR = (dataISO) => {
 };
 
 async function runIntegration() {
-  console.log(`INICIANDO SYNC COMPLETO: ${new Date().toLocaleString('pt-BR')}`);
+  console.log(`INICIANDO SYNC HISTORICO COMPLETO: ${new Date().toLocaleString('pt-BR')}`);
 
   try {
-    const dataFim = new Date();
-    const dataInicio = new Date(2025, 0, 1); 
+    const dataFim = new Date(); 
+    const dataInicio = new Date(2025, 0, 1); // 01/01/2025
 
     const dsInicio = dataInicio.toISOString().split('T')[0];
     const dsFim = dataFim.toISOString().split('T')[0];
@@ -53,7 +53,6 @@ async function runIntegration() {
 
     console.log(`Buscando de ${dsInicio} ate ${dsFim}`);
 
-    // LOOP DE PAGINAÇÃO (Igual ao seu Python)
     while (true) {
       const endpoint = ZENVIA_QUEUE_ID 
         ? `https://voice-api.zenvia.com/fila/${ZENVIA_QUEUE_ID}/relatorio`
@@ -75,23 +74,25 @@ async function runIntegration() {
       });
 
       const calls = response.data?.dados?.relatorio || [];
-      
       if (calls.length === 0) break;
 
       allCalls.push(...calls);
 
-      if (calls.length < limite) break; // Fim dos registros
+      if (calls.length < limite) break;
       posicao += limite;
       
-      // Trava de segurança para não estourar o GitHub Actions
-      if (posicao > 10000) break; 
+      // NOVA TRAVA: 500k registros (ajuste se precisar de mais)
+      if (posicao > 500000) {
+        console.warn("Limite de seguranca de 500k atingido.");
+        break;
+      }
     }
 
-    console.log(`Total de registros recuperados: ${allCalls.length}`);
+    console.log(`Total capturado: ${allCalls.length} registros.`);
 
     if (allCalls.length === 0) return;
 
-    // MAPEAMENTO PARA BATER COM O PADRÃO DO EXCEL (icaiu_telefonia)
+    // Mapeamento para o padrao icaiu_telefonia
     const rows = allCalls.map(item => {
       const fila_data_inicio = item.fila?.data_inicio || "";
       const ramal_numero = item.ramal?.numero || "";
@@ -129,19 +130,23 @@ async function runIntegration() {
       ];
     });
 
-    console.log(`Enviando para o Sheets...`);
-    
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A2`,
-      valueInputOption: 'USER_ENTERED', 
-      requestBody: { values: rows },
-    });
+    // Envio em blocos de 5000 para nao estourar o Google
+    const chunk_size = 5000;
+    for (let i = 0; i < rows.length; i += chunk_size) {
+      const chunk = rows.slice(i, i + chunk_size);
+      console.log(`Enviando bloco ${Math.floor(i/chunk_size) + 1} para o Sheets...`);
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A2`,
+        valueInputOption: 'USER_ENTERED', 
+        requestBody: { values: chunk },
+      });
+    }
 
-    console.log("Sucesso.");
+    console.log("Carga completa de 2025 ate hoje realizada com sucesso.");
 
   } catch (error) {
-    console.error("ERRO:");
+    console.error("ERRO NO PROCESSO:");
     console.error(error.response ? JSON.stringify(error.response.data) : error.message);
     process.exit(1);
   }
