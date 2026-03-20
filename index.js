@@ -1,27 +1,35 @@
 const axios = require('axios');
-const { google } = require('googleapis'); // Certifique-se de ter 'googleapis' no package.json
+const { google } = require('googleapis');
 
-// --- CONFIGURAÇÕES (Use GitHub Secrets para os tokens) ---
-const ZENVIA_TOKEN = process.env.ZENVIA_TOKEN;
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const SHEET_NAME = process.env.SHEET_NAME; 
-const RANGE = `${SHEET_NAME}!A2`;
+// --- CONFIGURAÇÕES VIA AMBIENTE (GITHUB SECRETS & PAYLOAD) ---
+const {
+  GOOGLE_TOKEN,          
+  ZENVIA_ACCESS_TOKEN,   
+  ZENVIA_QUEUE_ID,       
+  SPREADSHEET_ID,       
+  SHEET_NAME             
+} = process.env;
 
-// Configuração de Autenticação Google (Service Account)
-const auth = new google.auth.GoogleAuth({
-  credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
+// Validação de segurança
+if (!GOOGLE_TOKEN || GOOGLE_TOKEN === 'undefined') {
+  console.error("ERRO: GOOGLE_TOKEN não definido no payload.");
+  process.exit(1);
+}
 
-const sheets = google.sheets({ version: 'v4', auth });
+// Configuração de Autenticação via Access Token (OAuth2)
+const oauth2Client = new google.auth.OAuth2();
+oauth2Client.setCredentials({ access_token: GOOGLE_TOKEN });
+
+const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
 
 /**
  * Formata strings ISO para o padrão Brasileiro (DD/MM/YYYY HH:mm:ss)
  */
 const formatarParaBR = (dataISO) => {
-  if (!dataISO || dataISO === "null") return "";
+  if (!dataISO || dataISO === "null" || dataISO === "") return "";
   try {
     const data = new Date(dataISO);
+    if (isNaN(data.getTime())) return dataISO;
     return data.toLocaleString('pt-BR', {
       timeZone: 'America/Sao_Paulo',
       day: '2-digit',
@@ -37,7 +45,7 @@ const formatarParaBR = (dataISO) => {
 };
 
 async function runIntegration() {
-  console.log(`\nINICIANDO SINCRONIZAÇÃO: ${new Date().toLocaleString('pt-BR')}`);
+  console.log(`INICIANDO SINCRONIZAÇÃO: ${new Date().toLocaleString('pt-BR')}`);
 
   try {
     // 1. CALCULAR DATAS (Janela de 10 dias)
@@ -48,26 +56,30 @@ async function runIntegration() {
     const isoInicio = dataInicio.toISOString().split('T')[0];
     const isoFim = dataFim.toISOString().split('T')[0];
 
-    console.log(`Buscando de ${isoInicio} até ${isoFim} (Janela de 10 dias)`);
+    console.log(`Janela de busca: ${isoInicio} ate ${isoFim}`);
 
     // 2. BUSCAR NA API ZENVIA/HABLLA
     const response = await axios.get(`https://api.hablla.com.br/reports/services/summary`, {
-      params: { start: isoInicio, end: isoFim },
-      headers: { 'Authorization': `Bearer ${ZENVIA_TOKEN}` }
+      params: { 
+        start: isoInicio, 
+        end: isoFim,
+        queueId: ZENVIA_QUEUE_ID 
+      },
+      headers: { 'Authorization': `Bearer ${ZENVIA_ACCESS_TOKEN}` }
     });
 
     const chamadas = response.data;
     console.log(`API Retornou: ${Array.isArray(chamadas) ? chamadas.length : 0} registros.`);
 
-    if (!chamadas || chamadas.length === 0) {
+    if (!Array.isArray(chamadas) || chamadas.length === 0) {
       console.log("Nada para processar. Finalizando.");
       return;
     }
 
-    // LOG DE DEBUG DO PRIMEIRO ITEM (Pra você ver os nomes reais das chaves)
-    console.log("DEBUG - Estrutura do 1º item:", JSON.stringify(chamadas[0], null, 2));
+    // DEBUG para conferir nomes das chaves no log
+    console.log("ESTRUTURA DO 1º ITEM:", JSON.stringify(chamadas[0], null, 2));
 
-    // 3. MAPEAR E FORMATAR (Colunas B, C, D, E, F em PT-BR)
+    // 3. MAPEAMENTO E FORMATAÇÃO (Colunas B, C, D, E, F em PT-BR)
     const rows = chamadas.map(item => [
       item.id || item.uuid || "",             // Coluna A
       formatarParaBR(item.createdAt),         // Coluna B
@@ -79,27 +91,28 @@ async function runIntegration() {
       item.customerName || "N/A"              // Coluna H
     ]);
 
-    // 4. ENVIAR PARA O GOOGLE SHEETS (APPEND)
-    console.log(`Enviando ${rows.length} linhas para o Google Sheets...`);
+    // 4. ENVIAR PARA O GOOGLE SHEETS
+    const range = `${SHEET_NAME}!A2`;
+    console.log(`Enviando para a aba: ${SHEET_NAME}...`);
     
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: RANGE,
-      valueInputOption: 'USER_ENTERED', // Para o Sheets entender a data como data
+      range: range,
+      valueInputOption: 'USER_ENTERED', 
       requestBody: { values: rows },
     });
 
-    console.log("Sincronização concluída com sucesso!");
+    console.log("Sincronização concluída com sucesso.");
 
   } catch (error) {
-    console.error("ERRO FATAL:");
+    console.error("ERRO NO PROCESSO:");
     if (error.response) {
-      console.error(`Status: ${error.response.status}`);
-      console.error(`Detalhes:`, JSON.stringify(error.response.data));
+      console.error(`Status API: ${error.response.status}`);
+      console.error(`Dados:`, JSON.stringify(error.response.data));
     } else {
       console.error(error.message);
     }
-    process.exit(1); // Força falha no GitHub Actions se der erro
+    process.exit(1);
   }
 }
 
