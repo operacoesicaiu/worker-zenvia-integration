@@ -1,88 +1,106 @@
 const axios = require('axios');
+const { google } = require('googleapis'); // Certifique-se de ter 'googleapis' no package.json
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+// --- CONFIGURAÇÕES (Use GitHub Secrets para os tokens) ---
+const ZENVIA_TOKEN = process.env.ZENVIA_TOKEN;
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SHEET_NAME = process.env.SHEET_NAME; 
+const RANGE = `${SHEET_NAME}!A2`;
 
-function sanitize(val) {
-    if (typeof val !== 'string') return val;
-    const formulaChars = ['=', '+', '-', '@'];
-    return formulaChars.some(char => val.startsWith(char)) ? `'${val}` : val;
-}
+// Configuração de Autenticação Google (Service Account)
+const auth = new google.auth.GoogleAuth({
+  credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
 
-async function run() {
-    const {
-        ZENVIA_ACCESS_TOKEN, ZENVIA_QUEUE_ID,
-        SPREADSHEET_ID, SHEET_NAME, GOOGLE_TOKEN
-    } = process.env;
+const sheets = google.sheets({ version: 'v4', auth });
 
-    const gHeaders = { 'Authorization': `Bearer ${GOOGLE_TOKEN}`, 'Content-Type': 'application/json' };
-    const zHeaders = { 'Access-Token': ZENVIA_ACCESS_TOKEN, 'Content-Type': 'application/json' };
+/**
+ * Formata strings ISO para o padrão Brasileiro (DD/MM/YYYY HH:mm:ss)
+ */
+const formatarParaBR = (dataISO) => {
+  if (!dataISO || dataISO === "null") return "";
+  try {
+    const data = new Date(dataISO);
+    return data.toLocaleString('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  } catch (e) {
+    return dataISO;
+  }
+};
 
-    try {
-        // Cálculo de "Ontem" (Formato YYYY-MM-DD para a API Zenvia)
-        const dataRef = new Date();
-        dataRef.setDate(dataRef.getDate() - 1);
-        const dataFiltro = dataRef.toISOString().split('T')[0];
-        
-        console.log(`--- ETAPA 1: Buscando chamadas de ontem (${dataFiltro}) ---`);
+async function runIntegration() {
+  console.log(`\nINICIANDO SINCRONIZAÇÃO: ${new Date().toLocaleString('pt-BR')}`);
 
-        let allProcessed = [];
-        let posicao = 0;
-        const limite = 200;
+  try {
+    // 1. CALCULAR DATAS (Janela de 10 dias)
+    const dataFim = new Date();
+    const dataInicio = new Date();
+    dataInicio.setDate(dataFim.getDate() - 10);
 
-        while (true) {
-            const endpoint = ZENVIA_QUEUE_ID 
-                ? `https://voice-api.zenvia.com/fila/${ZENVIA_QUEUE_ID}/relatorio`
-                : `https://voice-api.zenvia.com/chamada/relatorio`;
+    const isoInicio = dataInicio.toISOString().split('T')[0];
+    const isoFim = dataFim.toISOString().split('T')[0];
 
-            const resp = await axios.get(endpoint, {
-                headers: zHeaders,
-                params: {
-                    posicao: posicao,
-                    limite: limite,
-                    data_inicio: dataFiltro,
-                    data_fim: dataFiltro
-                }
-            });
+    console.log(`Buscando de ${isoInicio} até ${isoFim} (Janela de 10 dias)`);
 
-            const calls = resp.data?.dados?.relatorio || resp.data?.data || [];
-            if (calls.length === 0) break;
+    // 2. BUSCAR NA API ZENVIA/HABLLA
+    const response = await axios.get(`https://api.hablla.com.br/reports/services/summary`, {
+      params: { start: isoInicio, end: isoFim },
+      headers: { 'Authorization': `Bearer ${ZENVIA_TOKEN}` }
+    });
 
-            calls.forEach(call => {
-                // Mapeamento baseado no seu export_to_excel.py
-                const row = [
-                    sanitize(call.id),
-                    sanitize(call.data_inicio),
-                    sanitize(call.numero_origem),
-                    sanitize(call.numero_destino),
-                    sanitize(call.ramal?.numero || ''),
-                    sanitize(call.status),
-                    sanitize(call.duracao),
-                    sanitize(call.tempo_espera),
-                    call.url_gravacao ? 'Disponível' : 'Não disponível',
-                    sanitize(call.url_gravacao || '')
-                ];
-                allProcessed.push(row);
-            });
+    const chamadas = response.data;
+    console.log(`API Retornou: ${Array.isArray(chamadas) ? chamadas.length : 0} registros.`);
 
-            if (calls.length < limite) break;
-            posicao += limite;
-            await sleep(500);
-        }
-
-        if (allProcessed.length > 0) {
-            console.log(`--- ETAPA 2: Enviando ${allProcessed.length} linhas para a aba ${SHEET_NAME} ---`);
-            const urlAppend = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/${SHEET_NAME}!A1:append?valueInputOption=USER_ENTERED`;
-            
-            await axios.post(urlAppend, { values: allProcessed }, { headers: gHeaders });
-            console.log("Processo concluído com sucesso!");
-        } else {
-            console.log("Nenhuma chamada encontrada para ontem.");
-        }
-
-    } catch (e) {
-        console.error("Falha:", e.response?.data || e.message);
-        process.exit(1);
+    if (!chamadas || chamadas.length === 0) {
+      console.log("Nada para processar. Finalizando.");
+      return;
     }
+
+    // LOG DE DEBUG DO PRIMEIRO ITEM (Pra você ver os nomes reais das chaves)
+    console.log("DEBUG - Estrutura do 1º item:", JSON.stringify(chamadas[0], null, 2));
+
+    // 3. MAPEAR E FORMATAR (Colunas B, C, D, E, F em PT-BR)
+    const rows = chamadas.map(item => [
+      item.id || item.uuid || "",             // Coluna A
+      formatarParaBR(item.createdAt),         // Coluna B
+      formatarParaBR(item.startedAt),         // Coluna C
+      formatarParaBR(item.answeredAt),        // Coluna D
+      formatarParaBR(item.finishedAt),        // Coluna E
+      formatarParaBR(item.closedAt),          // Coluna F
+      item.agentName || "N/A",                // Coluna G
+      item.customerName || "N/A"              // Coluna H
+    ]);
+
+    // 4. ENVIAR PARA O GOOGLE SHEETS (APPEND)
+    console.log(`Enviando ${rows.length} linhas para o Google Sheets...`);
+    
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: RANGE,
+      valueInputOption: 'USER_ENTERED', // Para o Sheets entender a data como data
+      requestBody: { values: rows },
+    });
+
+    console.log("Sincronização concluída com sucesso!");
+
+  } catch (error) {
+    console.error("ERRO FATAL:");
+    if (error.response) {
+      console.error(`Status: ${error.response.status}`);
+      console.error(`Detalhes:`, JSON.stringify(error.response.data));
+    } else {
+      console.error(error.message);
+    }
+    process.exit(1); // Força falha no GitHub Actions se der erro
+  }
 }
 
-run();
+runIntegration();
