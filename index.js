@@ -38,24 +38,25 @@ const formatarParaBR = (dataISO) => {
 };
 
 async function runIntegration() {
-  console.log(`INICIANDO SYNC DIARIO: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
+  console.log(`INICIANDO SYNC COM FILTRO: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
 
   try {
-    // --- AJUSTE DE FUSO HORARIO PARA PEGAR ONTEM CORRETAMENTE ---
-    // Cria a data atual baseada no fuso de Brasília
-    const hojeBR = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Sao_Paulo"}));
+    // 1. Definir o que é "ONTEM" no fuso de Brasília para o filtro
+    const agoraBR = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Sao_Paulo"}));
+    const ontemBR = new Date(agoraBR);
+    ontemBR.setDate(agoraBR.getDate() - 1);
     
-    // Subtrai 1 dia para garantir que estamos em "Ontem" no horário de Brasília
-    hojeBR.setDate(hojeBR.getDate() - 1);
+    const dataOntemAlvo = ontemBR.toISOString().split('T')[0]; // Ex: "2026-03-19"
 
-    const ano = hojeBR.getFullYear();
-    const mes = String(hojeBR.getMonth() + 1).padStart(2, '0');
-    const dia = String(hojeBR.getDate()).padStart(2, '0');
+    // 2. Definir busca ampla (D-2 até hoje) para a API
+    const dataInicioBusca = new Date(agoraBR);
+    dataInicioBusca.setDate(agoraBR.getDate() - 2);
     
-    const dsInicio = `${ano}-${mes}-${dia}`;
-    const dsFim = dsInicio; 
+    const dsInicio = dataInicioBusca.toISOString().split('T')[0];
+    const dsFim = agoraBR.toISOString().split('T')[0];
 
-    console.log(`Buscando dados de: ${dsInicio}`);
+    console.log(`API: Buscando intervalo amplo de ${dsInicio} ate ${dsFim}`);
+    console.log(`FILTRO: Mantendo apenas registros do dia ${dataOntemAlvo}`);
 
     const allCalls = [];
     let posicao = 0;
@@ -85,26 +86,29 @@ async function runIntegration() {
       if (calls.length === 0) break;
 
       allCalls.push(...calls);
-
       if (calls.length < limite) break;
       posicao += limite;
       
-      // Trava de seguranca para evitar loops infinitos
-      if (posicao > 50000) {
-        console.warn("Limite de seguranca de 50k atingido.");
-        break;
-      }
+      if (posicao > 50000) break;
     }
 
-    console.log(`Total capturado: ${allCalls.length} registros.`);
+    console.log(`Capturados da API: ${allCalls.length} registros totais.`);
 
-    if (allCalls.length === 0) {
-      console.log("Nenhum registro encontrado para ontem.");
+    // 3. FILTRO: Filtrar apenas os registros onde data_inicio é igual a dataOntemAlvo
+    // A Zenvia costuma retornar data_inicio como "YYYY-MM-DD HH:MM:SS"
+    const registrosFiltrados = allCalls.filter(item => {
+      return item.data_inicio && item.data_inicio.startsWith(dataOntemAlvo);
+    });
+
+    console.log(`Após filtro: ${registrosFiltrados.length} registros de ontem.`);
+
+    if (registrosFiltrados.length === 0) {
+      console.log("Nenhum registro de ontem após filtragem.");
       return;
     }
 
-    // Mapeamento para o padrao icaiu_telefonia
-    const rows = allCalls.map(item => {
+    // Mapeamento para o Google Sheets
+    const rows = registrosFiltrados.map(item => {
       const fila_data_inicio = item.fila?.data_inicio || "";
       const ramal_numero = item.ramal?.numero || "";
       const atendida = item.atendida ? "Atendida" : "Não atendida";
@@ -153,7 +157,7 @@ async function runIntegration() {
       });
     }
 
-    console.log(`Sync do dia ${dsInicio} concluido com sucesso.`);
+    console.log(`Processo finalizado: ${registrosFiltrados.length} linhas adicionadas de ${dataOntemAlvo}.`);
 
   } catch (error) {
     console.error("ERRO NO PROCESSO:");
