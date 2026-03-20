@@ -42,8 +42,7 @@ async function runIntegration() {
 
   try {
     const dataFim = new Date();
-    const dataInicio = new Date();
-    dataInicio.setDate(dataFim.getDate() - 10);
+    const dataInicio = new Date(2025, 0, 1); 
 
     const dsInicio = dataInicio.toISOString().split('T')[0];
     const dsFim = dataFim.toISOString().split('T')[0];
@@ -126,9 +125,7 @@ async function runIntegration() {
         item.fila?.id || "",                    // Fila ID (AA)
         item.url_gravacao || "",                // Gravação (AD)
         item.id || "",                          // Gravação ID (AE)
-        "MP3",                                  // Gravação Formato (AF)
         item.ativa || "",                       // Ativa (AI)
-        "Fila Principal",                       // Fila Nome (AK)
       ];
     });
 
