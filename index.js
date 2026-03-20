@@ -1,29 +1,23 @@
 const axios = require('axios');
 const { google } = require('googleapis');
 
-// --- CONFIGURAÇÕES VIA AMBIENTE (GITHUB SECRETS & PAYLOAD) ---
 const {
-  GOOGLE_TOKEN,          // Payload do GitHub Action
-  ZENVIA_ACCESS_TOKEN,   // Secret do Zenvia
-  ZENVIA_QUEUE_ID,       // Secret da Fila
-  SPREADSHEET_ID,        // Secret da Planilha
-  SHEET_NAME             // Secret do Nome da Aba
+  GOOGLE_TOKEN,
+  ZENVIA_ACCESS_TOKEN,
+  ZENVIA_QUEUE_ID,
+  SPREADSHEET_ID,
+  SHEET_NAME
 } = process.env;
 
-// Validação de segurança para o Token do Google
 if (!GOOGLE_TOKEN || GOOGLE_TOKEN === 'undefined') {
-  console.error("ERRO: GOOGLE_TOKEN nao definido. Verifique o trigger do workflow.");
+  console.error("ERRO: GOOGLE_TOKEN nao definido.");
   process.exit(1);
 }
 
-// Configuração de Autenticação Google (OAuth2)
 const oauth2Client = new google.auth.OAuth2();
 oauth2Client.setCredentials({ access_token: GOOGLE_TOKEN });
 const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
 
-/**
- * Formata datas para o padrão Brasileiro (DD/MM/YYYY HH:mm:ss)
- */
 const formatarParaBR = (dataISO) => {
   if (!dataISO || dataISO === "null" || dataISO === "") return "";
   try {
@@ -37,79 +31,108 @@ const formatarParaBR = (dataISO) => {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit'
-    });
+    }).replace(',', '');
   } catch (e) {
     return dataISO;
   }
 };
 
 async function runIntegration() {
-  console.log(`INICIANDO SYNC (ZENVIA VOICE): ${new Date().toLocaleString('pt-BR')}`);
+  console.log(`INICIANDO SYNC COMPLETO: ${new Date().toLocaleString('pt-BR')}`);
 
   try {
-    // 1. JANELA DE 10 DIAS (Igual ao solicitado)
     const dataFim = new Date();
     const dataInicio = new Date();
     dataInicio.setDate(dataFim.getDate() - 10);
 
-    const data_inicio = dataInicio.toISOString().split('T')[0];
-    const data_fim = dataFim.toISOString().split('T')[0];
+    const dsInicio = dataInicio.toISOString().split('T')[0];
+    const dsFim = dataFim.toISOString().split('T')[0];
 
-    console.log(`Janela de busca: ${data_inicio} ate ${data_fim}`);
+    const allCalls = [];
+    let posicao = 0;
+    const limite = 200;
 
-    // 2. BUSCA NA ZENVIA VOICE API 
-    // Se houver queue_id, usa o endpoint de relatório de fila, senão o geral.
-    const endpoint = ZENVIA_QUEUE_ID 
-      ? `https://voice-api.zenvia.com/fila/${ZENVIA_QUEUE_ID}/relatorio`
-      : `https://voice-api.zenvia.com/chamada/relatorio`;
+    console.log(`Buscando de ${dsInicio} ate ${dsFim}`);
 
-    const response = await axios.get(endpoint, {
-      params: {
-        data_inicio: data_inicio,
-        data_fim: data_fim,
-        limite: 200
-      },
-      headers: { 
-        'Access-Token': ZENVIA_ACCESS_TOKEN,
-        'Content-Type': 'application/json'
-      }
-    });
+    // LOOP DE PAGINAÇÃO (Igual ao seu Python)
+    while (true) {
+      const endpoint = ZENVIA_QUEUE_ID 
+        ? `https://voice-api.zenvia.com/fila/${ZENVIA_QUEUE_ID}/relatorio`
+        : `https://voice-api.zenvia.com/chamada/relatorio`;
 
-    // A Zenvia Voice API retorna os dados dentro de dados.relatorio
-    const chamadas = response.data?.dados?.relatorio || response.data?.dados || [];
-    
-    console.log(`API Retornou: ${chamadas.length} registros.`);
+      console.log(`Requisitando posicao: ${posicao}`);
+      
+      const response = await axios.get(endpoint, {
+        params: {
+          data_inicio: dsInicio,
+          data_fim: dsFim,
+          posicao: posicao,
+          limite: limite
+        },
+        headers: { 
+          'Access-Token': ZENVIA_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      });
 
-    if (chamadas.length === 0) {
-      console.log("Nada para processar. Finalizando.");
-      return;
+      const calls = response.data?.dados?.relatorio || [];
+      
+      if (calls.length === 0) break;
+
+      allCalls.push(...calls);
+
+      if (calls.length < limite) break; // Fim dos registros
+      posicao += limite;
+      
+      // Trava de segurança para não estourar o GitHub Actions
+      if (posicao > 10000) break; 
     }
 
-    // DEBUG para conferir estrutura
-    console.log("ESTRUTURA DO 1º ITEM:", JSON.stringify(chamadas[0], null, 2));
+    console.log(`Total de registros recuperados: ${allCalls.length}`);
 
-    // 3. MAPEAMENTO (Baseado no seu export_to_excel.py)
-    const rows = chamadas.map(item => {
+    if (allCalls.length === 0) return;
+
+    // MAPEAMENTO PARA BATER COM O PADRÃO DO EXCEL (icaiu_telefonia)
+    const rows = allCalls.map(item => {
       const fila_data_inicio = item.fila?.data_inicio || "";
       const ramal_numero = item.ramal?.numero || "";
-      
+      const atendida = item.atendida ? "Atendida" : "Não atendida";
+
       return [
-        item.id || "",                          // ID
-        formatarParaBR(item.data_inicio),       // Data/Hora
-        formatarParaBR(item.data_inicio),       // Início Origem
-        formatarParaBR(fila_data_inicio),       // Fim Origem (ou início destino)
-        item.numero_origem || "",               // Origem
-        item.numero_destino || "",              // Destino
-        ramal_numero,                           // Ramal
-        item.status || "",                      // Status
-        item.duracao || "0",                    // Duracao
-        item.tempo_espera || "0",               // Espera
-        item.url_gravacao || ""                 // Link Gravacao
+        item.id || "",                          // ID (A)
+        formatarParaBR(item.data_inicio),       // Data/Hora (B)
+        formatarParaBR(item.data_inicio),       // Data/Hora Início Origem (C)
+        formatarParaBR(fila_data_inicio),       // Data/Hora Fim Origem (D)
+        formatarParaBR(fila_data_inicio),       // Data/Hora Início Destino (E)
+        formatarParaBR(fila_data_inicio),       // Data/Hora Fim Destino (F)
+        item.numero_origem || "",               // Origem (G)
+        item.numero_destino || "",              // Destino (H)
+        ramal_numero,                           // RAMAL (I)
+        ramal_numero,                           // Agente Ramal (J)
+        item.status || "",                      // Status (K)
+        item.status || "",                      // Status Origem (L)
+        item.status || "",                      // Status Destino (M)
+        item.url_gravacao ? "Disponível" : "Não disponível", // Status Gravação (N)
+        item.duracao || "0",                    // Duracao (min) (O)
+        item.tempo_espera || "0",               // Espera (min) (P)
+        item.tempo_espera || "0",               // Tempo Ring Origem (Q)
+        item.tempo_espera || "0",               // Tempo Ring Destino (R)
+        item.tempo_espera || "0",               // Tempo Espera Fila (S)
+        atendida,                               // Motivo Desconexao Origem (T)
+        atendida,                               // Motivo Desconexao Destino (U)
+        item.ramal?.id || "",                   // Ramal ID Origem (X)
+        item.id || "",                          // CDR ID Origem (Y)
+        item.id || "",                          // CDR ID Destino (Z)
+        item.fila?.id || "",                    // Fila ID (AA)
+        item.url_gravacao || "",                // Gravação (AD)
+        item.id || "",                          // Gravação ID (AE)
+        "MP3",                                  // Gravação Formato (AF)
+        item.ativa || "",                       // Ativa (AI)
+        "Fila Principal",                       // Fila Nome (AK)
       ];
     });
 
-    // 4. GRAVAÇÃO NO GOOGLE SHEETS
-    console.log(`Gravando ${rows.length} linhas na aba: ${SHEET_NAME}`);
+    console.log(`Enviando para o Sheets...`);
     
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
@@ -118,16 +141,11 @@ async function runIntegration() {
       requestBody: { values: rows },
     });
 
-    console.log("Sincronizacao concluida com sucesso.");
+    console.log("Sucesso.");
 
   } catch (error) {
-    console.error("ERRO NO PROCESSO:");
-    if (error.response) {
-      console.error(`Status API: ${error.response.status}`);
-      console.error(`Mensagem:`, error.response.data);
-    } else {
-      console.error(error.message);
-    }
+    console.error("ERRO:");
+    console.error(error.response ? JSON.stringify(error.response.data) : error.message);
     process.exit(1);
   }
 }
