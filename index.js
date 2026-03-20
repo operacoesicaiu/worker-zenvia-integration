@@ -85,8 +85,7 @@ async function runIntegration() {
       if (calls.length < limite) break;
       posicao += limite;
       
-      // NOVA TRAVA: 500k registros (ajuste se precisar de mais)
-      if (posicao > 500000) {
+      if (posicao > 1000) {
         console.warn("Limite de seguranca de 500k atingido.");
         break;
       }
